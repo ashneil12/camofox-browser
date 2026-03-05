@@ -15,7 +15,9 @@ const { detectYtDlp, hasYtDlp, ytDlpTranscript, parseJson3, parseVtt, parseXml }
 // sessions survive container restarts. Profile JSON files are stored in
 // CAMOFOX_PROFILE_DIR (default: /root/.camofox/profiles), which should be
 // on a Docker volume for persistence.
+// Controlled by CAMOFOX_PERSIST_SESSIONS env var (default: true).
 const PROFILE_DIR = process.env.CAMOFOX_PROFILE_DIR || '/root/.camofox/profiles';
+const PERSIST_SESSIONS = process.env.CAMOFOX_PERSIST_SESSIONS !== 'false';
 
 function profilePath(userId) {
   const safeId = String(userId).replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -23,6 +25,7 @@ function profilePath(userId) {
 }
 
 function loadStorageState(userId) {
+  if (!PERSIST_SESSIONS) return null;
   const p = profilePath(userId);
   try {
     if (fs.existsSync(p)) {
@@ -37,6 +40,7 @@ function loadStorageState(userId) {
 }
 
 async function saveStorageState(userId, context) {
+  if (!PERSIST_SESSIONS) return;
   try {
     fs.mkdirSync(PROFILE_DIR, { recursive: true });
     const state = await context.storageState();
