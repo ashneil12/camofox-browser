@@ -27,6 +27,12 @@ RUN apt-get update && apt-get install -y \
     fonts-liberation \
     fonts-noto-color-emoji \
     fontconfig \
+    # VNC layer: virtual display + VNC server + web viewer
+    xvfb \
+    x11vnc \
+    x11-utils \
+    novnc \
+    websockify \
     # Utils
     ca-certificates \
     curl \
@@ -57,10 +63,14 @@ RUN npm install --production
 
 COPY server.js ./
 COPY lib/ ./lib/
+COPY entrypoint.sh ./
+RUN chmod +x entrypoint.sh
 
 ENV NODE_ENV=production
-ENV CAMOFOX_PORT=3000
+ENV CAMOFOX_PORT=9377
 
-EXPOSE 3000
+# REST API port + noVNC web viewer port
+EXPOSE 9377
+EXPOSE 6080
 
-CMD ["sh", "-c", "node --max-old-space-size=${MAX_OLD_SPACE_SIZE:-128} server.js"]
+CMD ["/app/entrypoint.sh"]
