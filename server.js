@@ -3,6 +3,8 @@ import { firefox } from 'playwright-core';
 import express from 'express';
 import crypto from 'crypto';
 import os from 'os';
+import fs from 'fs';
+import path from 'path';
 import { expandMacro } from './lib/macros.js';
 import { loadConfig } from './lib/config.js';
 import { windowSnapshot } from './lib/snapshot.js';
@@ -15,6 +17,43 @@ import {
   extractPageImages,
 } from './lib/downloads.js';
 import { detectYtDlp, hasYtDlp, ytDlpTranscript, parseJson3, parseVtt, parseXml } from './lib/youtube.js';
+
+// ── Persistent profile storage ──────────────────────────────────────────
+// Saves cookies, localStorage, and sessionStorage per userId so browser
+// sessions survive container restarts. Profile JSON files are stored in
+// CAMOFOX_PROFILE_DIR (default: /root/.camofox/profiles), which should be
+// on a Docker volume for persistence.
+const PROFILE_DIR = process.env.CAMOFOX_PROFILE_DIR || '/root/.camofox/profiles';
+
+function profilePath(userId) {
+  const safeId = String(userId).replace(/[^a-zA-Z0-9_-]/g, '_');
+  return path.join(PROFILE_DIR, safeId + '.json');
+}
+
+function loadStorageState(userId) {
+  const p = profilePath(userId);
+  try {
+    if (fs.existsSync(p)) {
+      const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+      return data;
+    }
+  } catch (e) {
+    // Corrupted profile — log and start fresh
+    console.error('[camofox] failed to load storage state for', userId, e.message);
+  }
+  return null;
+}
+
+async function saveStorageState(userId, context) {
+  try {
+    fs.mkdirSync(PROFILE_DIR, { recursive: true });
+    const state = await context.storageState();
+    fs.writeFileSync(profilePath(userId), JSON.stringify(state, null, 2));
+  } catch (e) {
+    // Non-fatal — session still works, just won't persist
+    console.error('[camofox] failed to save storage state for', userId, e.message);
+  }
+}
 
 const CONFIG = loadConfig();
 
@@ -419,7 +458,8 @@ async function restartBrowser(reason) {
   healthState.isRecovering = true;
   log('error', 'restarting browser', { reason, failures: healthState.consecutiveNavFailures });
   try {
-    for (const [, session] of sessions) {
+    for (const [userId, session] of sessions) {
+      await saveStorageState(userId, session.context);
       await session.context.close().catch(() => {});
     }
     sessions.clear();
@@ -456,7 +496,7 @@ async function launchBrowserInstance() {
   log('info', 'launching camoufox', { hostOS, geoip: !!proxy });
   
   const options = await launchOptions({
-    headless: true,
+    headless: !process.env.DISPLAY,
     os: hostOS,
     humanize: true,
     enable_cache: true,
@@ -476,6 +516,7 @@ async function ensureBrowser() {
       deadSessions: sessions.size,
     });
     for (const [userId, session] of sessions) {
+      await saveStorageState(userId, session.context);
       await session.context.close().catch(() => {});
     }
     sessions.clear();
@@ -528,11 +569,16 @@ async function getSession(userId) {
       contextOptions.timezoneId = 'America/Los_Angeles';
       contextOptions.geolocation = { latitude: 37.7749, longitude: -122.4194 };
     }
+    // Restore saved cookies/storage from persistent profile
+    const savedState = loadStorageState(key);
+    if (savedState) {
+      contextOptions.storageState = savedState;
+    }
     const context = await b.newContext(contextOptions);
     
     session = { context, tabGroups: new Map(), lastAccess: Date.now() };
     sessions.set(key, session);
-    log('info', 'session created', { userId: key });
+    log('info', 'session created', { userId: key, restored: !!savedState });
   }
   session.lastAccess = Date.now();
   return session;
@@ -2056,6 +2102,7 @@ app.delete('/sessions/:userId', async (req, res) => {
     const session = sessions.get(userId);
     if (session) {
       await clearSessionDownloads(session);
+      await saveStorageState(userId, session.context);
       await session.context.close();
       sessions.delete(userId);
       log('info', 'session closed', { userId });
@@ -2074,6 +2121,7 @@ setInterval(() => {
   for (const [userId, session] of sessions) {
     if (now - session.lastAccess > SESSION_TIMEOUT_MS) {
       clearSessionDownloads(session).catch(() => {});
+      saveStorageState(userId, session.context).catch(() => {});
       session.context.close().catch(() => {});
       sessions.delete(userId);
       log('info', 'session expired', { userId });
@@ -2643,6 +2691,7 @@ async function gracefulShutdown(signal) {
   server.close();
 
   for (const [userId, session] of sessions) {
+    await saveStorageState(userId, session.context);
     await session.context.close().catch(() => {});
   }
   if (browser) await browser.close().catch(() => {});
